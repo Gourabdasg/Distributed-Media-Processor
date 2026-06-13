@@ -1,0 +1,250 @@
+# Distributed Media Processing Microservice — Docker Compose
+
+x-common-env: &common-env
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: amqp://mediauser:mediapass@rabbitmq:5672/mediavhost
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+  AWS_REGION: ${AWS_REGION:-us-east-1}
+  AWS_S3_BUCKET_INPUT: ${AWS_S3_BUCKET_INPUT:-media-input-bucket}
+  AWS_S3_BUCKET_OUTPUT: ${AWS_S3_BUCKET_OUTPUT:-media-output-bucket}
+  AWS_CLOUDFRONT_DOMAIN: ${AWS_CLOUDFRONT_DOMAIN:-}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DEBUG: ${DEBUG:-false}
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 15s
+
+services:
+
+  # FastAPI Application
+  api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+      target: production
+    container_name: media-processor-api
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+      SECRET_KEY: ${SECRET_KEY:-changeme-in-production}
+    volumes:
+      - media-tmp:/tmp/media-processor
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health/ping"]
+      <<: *healthcheck-defaults
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # Celery Image Worker
+  worker-image:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: media-worker-image
+    command: >
+      celery -A app.core.celery_app.celery_app worker
+      --loglevel=info
+      --queues=image_queue
+      --concurrency=4
+      --hostname=image-worker@%h
+      --max-tasks-per-child=50
+    environment:
+      <<: *common-env
+    volumes:
+      - media-tmp:/tmp/media-processor
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # Celery Video Worker
+  worker-video:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: media-worker-video
+    command: >
+      celery -A app.core.celery_app.celery_app worker
+      --loglevel=info
+      --queues=video_queue
+      --concurrency=2
+      --hostname=video-worker@%h
+      --max-tasks-per-child=10
+    environment:
+      <<: *common-env
+    volumes:
+      - media-tmp:/tmp/media-processor
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # Celery Upload Worker
+  worker-upload:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: media-worker-upload
+    command: >
+      celery -A app.core.celery_app.celery_app worker
+      --loglevel=info
+      --queues=upload_queue
+      --concurrency=2
+      --hostname=upload-worker@%h
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # Celery Beat Scheduler
+  celery-beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: media-celery-beat
+    command: >
+      celery -A app.core.celery_app.celery_app beat
+      --loglevel=info
+      --schedule=/tmp/celerybeat-schedule
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # Celery Flower Monitoring
+  flower:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.worker
+    container_name: media-flower
+    command: >
+      celery -A app.core.celery_app.celery_app flower
+      --port=5555
+      --broker=amqp://mediauser:mediapass@rabbitmq:5672/mediavhost
+    ports:
+      - "5555:5555"
+    environment:
+      <<: *common-env
+    depends_on:
+      - rabbitmq
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # Redis
+  redis:
+    image: redis:7.2-alpine
+    container_name: media-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --maxmemory 512mb
+      --maxmemory-policy allkeys-lru
+      --save 60 1000
+      --appendonly yes
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      <<: *healthcheck-defaults
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # RabbitMQ
+  rabbitmq:
+    image: rabbitmq:3.12-management-alpine
+    container_name: media-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: mediauser
+      RABBITMQ_DEFAULT_PASS: mediapass
+      RABBITMQ_DEFAULT_VHOST: mediavhost
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      <<: *healthcheck-defaults
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:v2.48.0
+    container_name: media-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+    restart: unless-stopped
+    networks:
+      - media-net
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:10.2.0
+    container_name: media-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    networks:
+      - media-net
+
+volumes:
+  redis-data:
+  rabbitmq-data:
+  prometheus-data:
+  grafana-data:
+  media-tmp:
+
+networks:
+  media-net:
+    driver: bridge

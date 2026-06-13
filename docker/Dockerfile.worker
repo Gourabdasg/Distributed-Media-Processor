@@ -1,0 +1,50 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Dockerfile.worker — Celery Workers
+# Includes FFmpeg for video processing and Pillow for image processing
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.11-slim
+
+# Install system dependencies including FFmpeg
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # FFmpeg for video processing
+    ffmpeg \
+    # Pillow dependencies
+    libgl1 \
+    libglib2.0-0 \
+    libjpeg-dev \
+    libpng-dev \
+    libwebp-dev \
+    libtiff-dev \
+    # Font support for watermarking
+    fonts-dejavu-core \
+    fonts-dejavu-extra \
+    # Utilities
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Verify FFmpeg installation
+RUN ffmpeg -version | head -1
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application code
+COPY app/ ./app/
+
+# Non-root user
+RUN useradd --system --create-home --uid 1001 worker \
+    && chown -R worker:worker /app \
+    && mkdir -p /tmp/media-processor \
+    && chown -R worker:worker /tmp/media-processor
+USER worker
+
+# Default command (overridden in docker-compose)
+CMD ["celery", "-A", "app.core.celery_app.celery_app", "worker", \
+     "--loglevel=info", "--concurrency=2"]

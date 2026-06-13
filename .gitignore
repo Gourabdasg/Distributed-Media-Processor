@@ -1,0 +1,31 @@
+# SECRET - Never upload!
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+venv/
+env/
+.venv/
+
+# IDE
+.vscode/
+.pytest_cache/
+
+# Temp
+/tmp/
+*.log
+*.tmp
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Coverage
+htmlcov/
+.coverage

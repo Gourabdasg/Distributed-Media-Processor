@@ -1,0 +1,33 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    service: media-processor
+
+scrape_configs:
+  # FastAPI application metrics
+  - job_name: "media-api"
+    static_configs:
+      - targets: ["api:8000"]
+    metrics_path: "/metrics"
+
+  # Celery Flower metrics
+  - job_name: "celery-flower"
+    static_configs:
+      - targets: ["flower:5555"]
+    metrics_path: "/metrics"
+
+  # RabbitMQ metrics
+  - job_name: "rabbitmq"
+    static_configs:
+      - targets: ["rabbitmq:15692"]
+
+  # Redis metrics (requires redis_exporter)
+  - job_name: "redis"
+    static_configs:
+      - targets: ["redis:6379"]
+
+  # Prometheus self-monitoring
+  - job_name: "prometheus"
+    static_configs:
+      - targets: ["localhost:9090"]
